@@ -2,5 +2,8 @@
 VecindApp – Plataforma de Gestión Comunitaria
 
 > Diego Arias
+
 > Fabrizzio Riffo
+
 > Patricio Infante
+
