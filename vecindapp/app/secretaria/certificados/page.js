@@ -1,0 +1,370 @@
+// app/secretaria/certificados/page.js
+"use client";
+
+import { useMemo, useState } from "react";
+import { jsPDF } from "jspdf";
+
+// --- Lista de comunas (Región Metropolitana) ---
+const COMUNAS_RM = [
+  "Alhué","Buin","Calera de Tango","Cerrillos","Cerro Navia","Colina","Conchalí","Curacaví",
+  "El Bosque","El Monte","Estación Central","Huechuraba","Independencia","Isla de Maipo",
+  "La Cisterna","La Florida","La Granja","La Pintana","La Reina","Lampa","Las Condes",
+  "Lo Barnechea","Lo Espejo","Lo Prado","Macul","Maipú","María Pinto","Melipilla","Ñuñoa",
+  "Paine","Pedro Aguirre Cerda","Peñaflor","Peñalolén","Pirque","Providencia","Pudahuel",
+  "Puente Alto","Quilicura","Quinta Normal","Recoleta","Renca","San Bernardo","San Joaquín",
+  "San José de Maipo","San Miguel","San Pedro","San Ramón","Santiago","Talagante","Tiltil",
+  "Vitacura"
+].sort();
+
+// --- Utilidades RUT / Fecha ---
+function limpiarRut(rut) {
+  return (rut || "").replace(/[.\-]/g, "").toUpperCase();
+}
+function formatearRut(rut) {
+  const v = limpiarRut(rut);
+  if (!v) return "";
+  const cuerpo = v.slice(0, -1);
+  const dv = v.slice(-1);
+  const conPuntos = cuerpo.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${conPuntos}-${dv}`;
+}
+function validarRut(rut) {
+  const r = limpiarRut(rut);
+  if (!r || r.length < 2) return false;
+  const cuerpo = r.slice(0, -1);
+  const dv = r.slice(-1);
+  let suma = 0;
+  let multiplo = 2;
+  for (let i = cuerpo.length - 1; i >= 0; i--) {
+    suma += parseInt(cuerpo[i], 10) * multiplo;
+    multiplo = multiplo === 7 ? 2 : multiplo + 1;
+  }
+  const resto = 11 - (suma % 11);
+  const dvEsperado = resto === 11 ? "0" : resto === 10 ? "K" : String(resto);
+  return dvEsperado === dv.toUpperCase();
+}
+function hoyCL() {
+  return new Intl.DateTimeFormat("es-CL", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(new Date());
+}
+
+export default function EmitirCertificadoResidenciaPage() {
+  const [form, setForm] = useState({
+    nombre: "",
+    rut: "",
+    direccion: "",
+    comuna: "",
+    ciudad: "Santiago", // Fija a Santiago
+    numero: "", // folio asignado automáticamente (readOnly)
+  });
+  const [errors, setErrors] = useState({});
+  const rutFormateado = useMemo(() => formatearRut(form.rut), [form.rut]);
+
+  function onChange(e) {
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+  }
+
+  function validar() {
+    const e = {};
+    if (!form.nombre.trim()) e.nombre = "Ingresa el nombre completo";
+    if (!form.rut.trim()) e.rut = "Ingresa el RUT";
+    else if (!validarRut(form.rut)) e.rut = "RUT inválido";
+    if (!form.direccion.trim()) e.direccion = "Ingresa la dirección";
+    if (!form.comuna.trim()) e.comuna = "Selecciona la comuna";
+    // ciudad siempre es "Santiago"
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  async function emitirEnSupabase() {
+    const res = await fetch("/api/certificados/emitir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nombre: form.nombre,
+        rut: form.rut,
+        direccion: form.direccion,
+        comuna: form.comuna,
+        ciudad: form.ciudad, // "Santiago"
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || "Error al generar folio en la base de datos");
+      throw new Error("Error al emitir certificado");
+    }
+    return String(data.folio); // folio REAL desde BD
+  }
+
+  async function emitirYGenerarPDF() {
+    if (!validar()) return;
+    const folio = await emitirEnSupabase();
+    setForm((prev) => ({ ...prev, numero: folio }));
+    generarPDFEstiloSolicitudes(folio); // mismo estilo que la page de solicitudes
+  }
+
+  // === PDF (estilo solicitudes, con folio real) ===
+  function generarPDFEstiloSolicitudes(folio) {
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "letter" });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const centerX = pageWidth / 2;
+
+    const nombreJunta = (process.env.NEXT_PUBLIC_JUNTA_NOMBRE || "Junta de Vecinos") + "";
+    const rutJunta = (process.env.NEXT_PUBLIC_JUNTA_RUT || "") + "";
+
+    // Borde doble
+    doc.setLineWidth(2);
+    doc.setDrawColor(41, 128, 185);
+    doc.rect(10, 10, pageWidth - 20, pageHeight - 20);
+    doc.setLineWidth(0.5);
+    doc.setDrawColor(52, 152, 219);
+    doc.rect(12, 12, pageWidth - 24, pageHeight - 24);
+
+    let y = 30;
+
+    // Encabezado
+    doc.setFontSize(24);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(41, 128, 185);
+    doc.text(nombreJunta.toUpperCase(), centerX, y, { align: "center" });
+    y += 8;
+
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(100, 100, 100);
+    if (rutJunta) {
+      doc.text(`RUT: ${rutJunta}`, centerX, y, { align: "center" });
+      y += 6;
+    }
+    doc.text(`Comuna de ${form.comuna || "-" }, ${form.ciudad}`, centerX, y, { align: "center" });
+    y += 15;
+
+    // Separador
+    doc.setDrawColor(41, 128, 185);
+    doc.setLineWidth(0.5);
+    doc.line(20, y, pageWidth - 20, y);
+    y += 15;
+
+    // Título
+    doc.setFontSize(20);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(0, 0, 0);
+    doc.text("CERTIFICADO DE RESIDENCIA", centerX, y, { align: "center" });
+    y += 15;
+
+    // Folio real
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "italic");
+    doc.setTextColor(100, 100, 100);
+    doc.text(`N° ${folio}`, centerX, y, { align: "center" });
+    y += 15;
+
+    // Cuerpo
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(0, 0, 0);
+    doc.text(`La Directiva de la ${nombreJunta},`, centerX, y, { align: "center" });
+    y += 7;
+    doc.text("por medio del presente documento,", centerX, y, { align: "center" });
+    y += 12;
+
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text("CERTIFICA QUE:", centerX, y, { align: "center" });
+    y += 12;
+
+    const nombreCompleto = (form.nombre || "").toUpperCase();
+    const rutFmt = rutFormateado || form.rut || "";
+    const direccion = form.direccion || "";
+
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.text(`Don/Doña: ${nombreCompleto}`, centerX, y, { align: "center" });
+    doc.setFont("helvetica", "normal");
+    y += 10;
+
+    if (rutFmt) {
+      doc.text(`RUT: ${rutFmt}`, centerX, y, { align: "center" });
+      y += 10;
+    }
+    doc.text(`Es residente de la dirección: ${direccion}`, centerX, y, { align: "center" });
+    y += 7;
+    doc.text(`Comuna de ${form.comuna}, ${form.ciudad}.`, centerX, y, { align: "center" });
+    y += 10;
+
+    doc.setFontSize(11);
+    const fechaEmision = hoyCL();
+    doc.text(`Se extiende el presente certificado en ${form.comuna},`, centerX, y, { align: "center" });
+    y += 6;
+    doc.text(`a ${fechaEmision}`, centerX, y, { align: "center" });
+
+    // Firma
+    y = pageHeight - 60;
+    doc.setLineWidth(0.5);
+    doc.setDrawColor(0, 0, 0);
+    doc.line(centerX - 30, y, centerX + 30, y);
+    y += 6;
+
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "bold");
+    doc.text("DIRECTIVA", centerX, y, { align: "center" });
+    y += 5;
+    doc.setFont("helvetica", "normal");
+    doc.text(nombreJunta, centerX, y, { align: "center" });
+
+    // Pie
+    y = pageHeight - 25;
+    doc.setFontSize(8);
+    doc.setFont("helvetica", "italic");
+    doc.setTextColor(120, 120, 120);
+    doc.text("Este documento ha sido generado digitalmente por la Junta de Vecinos.", centerX, y, { align: "center" });
+
+    const nombreArchivo = `certificado_residencia_${limpiarRut(form.rut)}.pdf`;
+    doc.save(nombreArchivo);
+  }
+
+  // ---- Estilos UI (como tu dashboard) ----
+  const palette = {
+    primary: "#439fa4",
+    primaryDark: "#154765",
+    warn: "#fbbf24",
+    danger: "#fb7185",
+    success: "#34d399",
+    bg: "#f4f8f9",
+    light: "#bfd3d9",
+  };
+  const cardStyle = {
+    background: "white",
+    borderRadius: "16px",
+    padding: "1.5rem",
+    boxShadow: "0 2px 8px rgba(21, 71, 101, 0.06)",
+  };
+  const labelStyle = { fontSize: "0.875rem", fontWeight: 600, color: palette.primary, marginBottom: 6 };
+  const inputStyle = { border: `1px solid ${palette.light}`, borderRadius: 12, padding: "0.75rem 0.875rem", outline: "none" };
+  const errorStyle = { color: "#dc2626", fontSize: "0.8125rem", marginTop: 6 };
+
+  return (
+    <div
+      className="emitir-page"
+      style={{ background: palette.bg, borderRadius: "16px", padding: "2rem", boxShadow: "0 2px 8px rgba(21, 71, 101, 0.06)" }}
+    >
+      <div className="header" style={{ marginBottom: "2rem", paddingBottom: "1rem", borderBottom: `2px solid ${palette.light}` }}>
+        <h1 style={{ color: palette.primaryDark, fontSize: "2rem", fontWeight: 700, margin: 0 }}>
+          <i className="bi bi-file-earmark-text me-2"></i>Emitir Certificado de Residencia
+        </h1>
+        <p style={{ color: palette.primary, marginTop: 8 }}>
+          Completa los datos del vecino y genera el PDF con un clic.
+        </p>
+      </div>
+
+      <div className="form-card" style={cardStyle}>
+        <div
+          className="grid"
+          style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "1rem" }}
+        >
+          {/* Nombre */}
+          <div className="field" style={{ display: "flex", flexDirection: "column" }}>
+            <label style={labelStyle}>Nombre completo</label>
+            <input name="nombre" value={form.nombre} onChange={onChange} placeholder="Ej: María Pérez Soto" style={inputStyle} />
+            {errors.nombre && <span style={errorStyle}>{errors.nombre}</span>}
+          </div>
+
+          {/* RUT */}
+          <div className="field" style={{ display: "flex", flexDirection: "column" }}>
+            <label style={labelStyle}>RUT</label>
+            <input name="rut" value={form.rut} onChange={onChange} placeholder="12.345.678-9" style={inputStyle} />
+            <div style={{ fontSize: "0.75rem", color: palette.primary, marginTop: 6 }}>
+              {rutFormateado ? `Formateado: ${rutFormateado}` : ""}
+            </div>
+            {errors.rut && <span style={errorStyle}>{errors.rut}</span>}
+          </div>
+
+          {/* Dirección */}
+          <div className="field" style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column" }}>
+            <label style={labelStyle}>Dirección</label>
+            <input name="direccion" value={form.direccion} onChange={onChange} placeholder="Calle 123, depto 45" style={inputStyle} />
+            {errors.direccion && <span style={errorStyle}>{errors.direccion}</span>}
+          </div>
+
+          {/* Comuna (SELECT) */}
+          <div className="field" style={{ display: "flex", flexDirection: "column" }}>
+            <label style={labelStyle}>Comuna</label>
+            <select
+              name="comuna"
+              value={form.comuna}
+              onChange={onChange}
+              style={{ ...inputStyle, appearance: "auto" }}
+            >
+              <option value="">Selecciona la comuna…</option>
+              {COMUNAS_RM.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+            {errors.comuna && <span style={errorStyle}>{errors.comuna}</span>}
+          </div>
+
+          {/* Ciudad (solo lectura = Santiago) */}
+          <div className="field" style={{ display: "flex", flexDirection: "column" }}>
+            <label style={labelStyle}>Ciudad</label>
+            <input
+              name="ciudad"
+              value={form.ciudad}
+              readOnly
+              style={{ ...inputStyle, backgroundColor: "#f0f0f0" }}
+            />
+            {errors.ciudad && <span style={errorStyle}>{errors.ciudad}</span>}
+          </div>
+
+          {/* Nº de certificado (readonly) */}
+          <div className="field" style={{ display: "flex", flexDirection: "column" }}>
+            <label style={labelStyle}>Nº de certificado</label>
+            <input
+              name="numero"
+              value={form.numero}
+              placeholder="Se asigna automáticamente"
+              style={{ ...inputStyle, backgroundColor: "#f0f0f0" }}
+              readOnly
+            />
+          </div>
+        </div>
+
+        <div className="actions" style={{ display: "flex", gap: "0.75rem", marginTop: "1.25rem" }}>
+          <button
+            onClick={emitirYGenerarPDF}
+            style={{ background: palette.primary, color: "white", border: "none", borderRadius: 12, padding: "0.75rem 1rem", fontWeight: 700, cursor: "pointer" }}
+          >
+            <i className="bi bi-file-earmark-arrow-down me-2"></i>Emitir y generar PDF
+          </button>
+          <a
+            href="/secretaria"
+            style={{ background: palette.light, color: palette.primaryDark, textDecoration: "none", borderRadius: 12, padding: "0.75rem 1rem", fontWeight: 700, display: "inline-flex", alignItems: "center" }}
+          >
+            <i className="bi bi-arrow-left me-2"></i>Volver al Panel
+          </a>
+        </div>
+      </div>
+
+      <div
+        className="help"
+        style={{ marginTop: "2rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1.5rem" }}
+      >
+        <div className="card" style={{ ...cardStyle, borderLeft: `4px solid ${palette.success}` }}>
+          <h3 style={{ color: palette.primaryDark, marginTop: 0 }}>
+            <i className="bi bi-check-circle me-2" style={{ color: palette.success }}></i>Recomendaciones
+          </h3>
+          <ul style={{ margin: 0, paddingLeft: "1rem", color: palette.primaryDark }}>
+            <li>Verifica el RUT y la dirección antes de emitir.</li>
+            <li>El Nº de certificado se asigna automáticamente por el sistema.</li>
+            <li>Guarda el PDF emitido para adjuntarlo a la solicitud.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
